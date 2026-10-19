@@ -173,6 +173,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       <span>하루가 통째로 바뀌는 날:</span>
       <span id="dchips"></span>
       <label>이름 <input id="mlabel" placeholder="예: 학력평가"></label>
+      <button type="button" class="dchip" id="fri6" aria-pressed="true">금요일 6교시 창체</button>
     </div>
     <div id="sheet" class="sheet" style="margin-top:12px"></div>
     <div id="preview" hidden style="margin-top:12px">
@@ -206,6 +207,22 @@ function joinT(xml) {
   while ((m = re.exec(xml))) out += m[1];
   return xmlText(out);
 }
+/* 칸 배경색 읽기: styles.xml 의 fills / cellXfs. 한셀 파일은 일부 항목을 mc:AlternateContent 로 감싸 두므로
+   감싼 항목도 한 개로 센다(그래야 번호가 맞는다). 결과: 스타일 번호 -> "69D8AD" 같은 색(단색 채우기만) */
+function topItems(block, tag) {
+  var re = new RegExp("<mc:AlternateContent[\\s\\S]*?</mc:AlternateContent>|<(?:\\w+:)?" + tag + "\\b[^>]*?/>|<(?:\\w+:)?" + tag + "\\b[^>]*>[\\s\\S]*?</(?:\\w+:)?" + tag + ">", "g");
+  return block ? block.match(re) || [] : [];
+}
+function styleFills(xml) {
+  if (!xml) return [];
+  var fb = (/<(?:\w+:)?fills\b[\s\S]*?<\/(?:\w+:)?fills>/.exec(xml) || [""])[0];
+  var xb = (/<(?:\w+:)?cellXfs\b[\s\S]*?<\/(?:\w+:)?cellXfs>/.exec(xml) || [""])[0];
+  var fills = topItems(fb.replace(/^<[^>]*>/, ""), "fill").map(function (f) {
+    var m = /<(?:\w+:)?patternFill[^>]*patternType="solid"[^>]*>[\s\S]*?<(?:\w+:)?fgColor[^>]*rgb="(?:[0-9A-Fa-f]{2})?([0-9A-Fa-f]{6})"/.exec(f);
+    return m ? m[1].toUpperCase() : null;
+  });
+  return topItems(xb.replace(/^<[^>]*>/, ""), "xf").map(function (x) { var m = /fillId="(\d+)"/.exec(x); return m ? fills[+m[1]] || null : null; });
+}
 async function readBook(buf) {
   var zip = await JSZip.loadAsync(buf);
   var read = async function (p) { var f = zip.file(p); return f ? f.async("string") : null; };
@@ -218,14 +235,17 @@ async function readBook(buf) {
     var id = /Id="([^"]+)"/.exec(rm[0]), tg = /Target="([^"]+)"/.exec(rm[0]);
     if (id && tg) relMap[id[1]] = tg[1];
   }
+  var xfFill = styleFills(await read("xl/styles.xml"));
   var sheets = [], sr = /<(?:\w+:)?sheet\s[^>]*>/g, sm;
   while ((sm = sr.exec(wb))) {
     var nm = /name="([^"]*)"/.exec(sm[0]), rid = /r:id="([^"]+)"/.exec(sm[0]);
     if (!nm || !rid || !relMap[rid[1]]) continue;
     var target = relMap[rid[1]].replace(/^\//, ""); target = target.indexOf("xl/") === 0 ? target : "xl/" + target;
     var xml = await read(target); if (!xml) continue;
-    var grid = new Map(), cr = /<(?:\w+:)?c r="([A-Z]+)(\d+)"([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?c>)/g, c;
+    var grid = new Map(), fill = new Map(), cr = /<(?:\w+:)?c r="([A-Z]+)(\d+)"([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?c>)/g, c;
     while ((c = cr.exec(xml))) {
+      var sid = /\bs="(\d+)"/.exec(c[3]), color = sid ? xfFill[+sid[1]] : null;
+      if (color && color !== "FFFFFF") { if (!fill.has(+c[2])) fill.set(+c[2], new Map()); fill.get(+c[2]).set(colNum(c[1]), color); }
       if (!c[4]) continue;
       var t = (/\bt="(\w+)"/.exec(c[3]) || [])[1], v = /<(?:\w+:)?v>([\s\S]*?)<\/(?:\w+:)?v>/.exec(c[4]), val;
       if (t === "inlineStr") val = joinT(c[4]);
@@ -235,7 +255,7 @@ async function readBook(buf) {
       var row = +c[2]; if (!grid.has(row)) grid.set(row, new Map());
       grid.get(row).set(colNum(c[1]), val);
     }
-    sheets.push({ name: xmlText(nm[1]), grid: grid });
+    sheets.push({ name: xmlText(nm[1]), grid: grid, fill: fill });
   }
   return sheets;
 }
@@ -280,6 +300,12 @@ function parseBook(sheets, fileName) {
     var mon = new Date(y, days[k0].m - 1, days[k0].d - k0);
     days.forEach(function (d, i) { var x = new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() + i); d.m = x.getMonth() + 1; d.d = x.getDate(); });
   }
+  // 1행 범례 칸(시간교체/날짜교체/수업보강)의 배경색 = '바뀐 수업' 표시 색
+  var changeColors = new Set();
+  (cur.grid.get(1) || new Map()).forEach(function (v, c) {
+    var col = (cur.fill.get(1) || new Map()).get(c);
+    if (col && /교체|보강/.test(v.replace(/\s+/g, ""))) changeColors.add(col);
+  });
   var issued = "";
   cur.grid.get(1) && cur.grid.get(1).forEach(function (v) { if (/배부일시/.test(v)) issued = v.replace(/배부일시\s*:?\s*/, "").trim(); });
 
@@ -304,7 +330,7 @@ function parseBook(sheets, fileName) {
   var roster = Array.from(new Set(teacherNames));   // 명단은 올린 파일의 교사시간표에서만 가져온다
   var tokens = new Set();                              // 파일에 실제로 쓰인 선생님 표기
   cur.grid.forEach(function (cols, r) { if (r >= 4) cols.forEach(function (v) { if (v.indexOf("/") >= 0) rawLessons(v).forEach(function (l) { l.toks.forEach(function (t) { tokens.add(t); }); }); }); });
-  var book = { labelCol: labelCol, cur: cur, base: base, classRows: classRows, colMap: colMap, days: days, title: title, issued: issued,
+  var book = { changeColors: changeColors, labelCol: labelCol, cur: cur, base: base, classRows: classRows, colMap: colMap, days: days, title: title, issued: issued,
                baseAt: baseAt, teacherRows: teacherRows, teacherNames: teacherNames, teacherSubjects: teacherSubjects, roster: roster, tokens: tokens, fileName: fileName };
   return book;
 }
@@ -356,7 +382,12 @@ function splitCell(book, v) {
 }
 function classCells(book, cls) {
   var row = book.classRows[cls], out = new Map(), cols = book.cur.grid.get(row) || new Map();
-  cols.forEach(function (v, c) { if (book.colMap.has(c)) out.set(book.colMap.get(c).join(","), splitCell(book, v)); });
+  var fills = book.cur.fill.get(row) || new Map();
+  cols.forEach(function (v, c) {
+    if (!book.colMap.has(c)) return;
+    var cell = splitCell(book, v); cell.fill = fills.get(c) || null; cell.colored = book.changeColors.has(cell.fill);
+    out.set(book.colMap.get(c).join(","), cell);
+  });
   return out;
 }
 function labelOk(label, cls, subj) {
@@ -397,7 +428,7 @@ function teacherVM(book, name) {
   Object.keys(book.classRows).forEach(function (cls) {
     classCells(book, cls).forEach(function (cell, key) {
       var part = cell.parts.find(function (p) { return p.names.indexOf(name) >= 0; });   // 한 칸에 수업이 둘이면 내 수업만
-      if (part) now.set(key, { subj: part.subj, cls: cls });
+      if (part) now.set(key, { subj: part.subj, cls: cls, colored: cell.colored });
     });
   });
   var r = book.teacherRows[name];
@@ -407,7 +438,9 @@ function teacherVM(book, name) {
   }
   var hasBase = orig.size > 0;
   var same = function (a, b) { return a && b && a.subj === b.subj && a.cls === b.cls; };
-  var changed = new Set(); now.forEach(function (v, k) { if (hasBase && !same(orig.get(k), v)) changed.add(k); });
+  // 바뀐 칸: 엑셀에 시간교체·날짜교체·보강 색이 있으면 그 색으로, 없으면 기초(교사시간표)와 비교
+  var useColor = book.changeColors.size > 0;
+  var changed = new Set(); now.forEach(function (v, k) { if (useColor ? v.colored : (hasBase && !same(orig.get(k), v))) changed.add(k); });
   var removed = new Set();   // 수업이 없는 요일(연휴 등)의 원래 수업은 '수업 없음'으로 표시하지 않는다
   if (hasBase) orig.forEach(function (v, k) { if (!now.has(k) && !book.days[+k.split(",")[0]].off) removed.add(k); });
   // 같은 수업이 여러 칸에서 옮겨졌으면 가장 가까운 칸끼리 짝짓는다(같은 요일 우선)
@@ -445,21 +478,21 @@ function teacherVM(book, name) {
 
 /* 학급 시간표에서 선생님 이름을 적지 않는 수업: 창체, 1학년 수학(분반 수업이라 학생마다 선생님이 다르다) */
 function hideTeacher(cls, subj) { return /^창체/.test(subj) || (cls.split("-")[0] === "1" && /^수학/.test(subj)); }
-function classVM(book, cls, mergedDays) {
+/* 금요일 6교시 창체: 엑셀에는 금요일 6교시 칸이 없어서 기본으로 넣는다.
+   금요일이 휴일이거나 공지에 단축 수업이 보이면 넣지 않고, 화면의 버튼으로 끌 수도 있다. */
+var FRI6_OFF_RE = /단축|5교시\s*까지|6교시\s*(없|미실시|생략)/;
+function classVM(book, cls, mergedDays, fri6) {
   var cells = {}, cur = classCells(book, cls), hasBase = book.baseAt.size > 0, anyChange = false;
+  var useColor = book.changeColors.size > 0;   // 엑셀의 시간교체·날짜교체·보강 색을 그대로 따른다
   cur.forEach(function (cell, key) {
     var shown = cell.parts.filter(function (p) { return !hideTeacher(cls, p.subj); });
     var o = { l1: cell.subj, l2: [].concat.apply([], shown.map(function (p) { return p.names; })).join("·"), tone: -1 };
-    if (hasBase && cell.names.length) {
+    if (useColor) { if (cell.colored) { o.changed = true; anyChange = true; } }
+    else if (hasBase && cell.names.length) {
       var entries = book.baseAt.get(key) || [];
       var ok = cell.parts.every(function (p) { return p.names.every(function (n) { return entries.some(function (e) { return labelOk(e.label, cls, p.subj) && e.name === n; }); }); });
       if (!ok) {
-        o.changed = true; anyChange = true;
-        var fixed = entries.filter(function (e) { return fixedLabelOk(e.label, cls); });
-        if (fixed.length) {
-          var first = fixed[0].subj, tn = Array.from(new Set(fixed.filter(function (e) { return e.subj === first; }).map(function (e) { return e.name; })));
-          o.l3 = first + (hideTeacher(cls, first) || tn.length > 1 ? "" : " " + tn.join("·"));  // 창체·1학년 수학·여러 선생님이면 과목만
-        }
+        o.changed = true; anyChange = true;   // 원래 수업(취소선)은 적지 않는다
       }
     }
     cells[key] = o;
@@ -473,10 +506,17 @@ function classVM(book, cls, mergedDays) {
   });
   var merged = {};
   Object.keys(mergedDays).forEach(function (i) { if (mergedDays[i] != null) merged[i] = mergedDays[i] || "일정"; });
+  var fri = book.days[4], days = book.days;
+  var fri6Auto = !fri.off && fri.max === 5 && !FRI6_OFF_RE.test(fri.notes.join(" "));   // 자동 판단
+  var fri6Shown = fri6Auto && fri6 !== false && !cells["4,6"];
+  if (fri6Shown) {
+    cells["4,6"] = { l1: "창체", l2: "", tone: -1 };
+    days = book.days.map(function (d, i) { return i === 4 ? Object.assign({}, d, { max: 6 }) : d; });
+  }
   return {
     kind: "class", title: cls + "반 주간 시간표", range: rangeText(book),
-    chips: [], legend: hasBase ? [{ sw: "chg", text: "기초시간표와 달라진 수업" }] : [], days: book.days, cells: cells, merged: merged,
-    mergedChanged: hasBase, notes: notes, foot: [book.issued ? "배부 " + book.issued : ""].filter(Boolean), detected: detected,
+    chips: [], legend: useColor ? [{ sw: "chg", text: "바뀐 수업(시간교체·날짜교체·보강)" }] : hasBase ? [{ sw: "chg", text: "기초시간표와 달라진 수업" }] : [], days: days, cells: cells, merged: merged, fri6Auto: fri6Auto, fri6Shown: fri6Shown,
+    mergedChanged: useColor || hasBase, notes: notes, foot: [book.issued ? "배부 " + book.issued : ""].filter(Boolean), detected: detected,
     empty: cur.size === 0
   };
 }
@@ -633,7 +673,7 @@ async function renderPNG(vm) {
 
 /* ============================== 화면 동작 ============================== */
 var $ = function (id) { return document.getElementById(id); };
-var state = { book: null, name: "", grade: "", klass: "", tab: "t", merged: {} };
+var state = { book: null, name: "", grade: "", klass: "", tab: "t", merged: {}, fri6: true };
 function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
 
 function showError(msg) { var e = $("err"); e.hidden = !msg; e.textContent = msg || ""; }
@@ -650,9 +690,14 @@ function currentVM() {
   var cls = state.grade && state.klass ? state.grade + "-" + state.klass : "";
   if (!cls) return null;
   if (!b.classRows[cls]) return { kind: "class", title: cls + "반 주간 시간표", range: "", chips: [], legend: [], days: b.days, cells: {}, merged: {}, notes: [], foot: [], empty: true };
-  return classVM(b, cls, state.merged);
+  return classVM(b, cls, state.merged, state.fri6);
 }
 function updateMergeBox(vm) {
+  var f6 = $("fri6");
+  if (vm && vm.kind === "class") {
+    f6.setAttribute("aria-pressed", vm.fri6Shown ? "true" : "false"); f6.disabled = !vm.fri6Auto;
+    f6.title = vm.fri6Auto ? "누르면 금요일 6교시 창체를 넣거나 뺍니다" : "이번 주는 금요일 6교시가 없습니다(휴일 또는 단축)";
+  }
   var box = $("mergebox"); box.hidden = state.tab !== "c" || !vm || vm.empty;
   if (box.hidden) return;
   var host = $("dchips"); host.textContent = "";
@@ -731,6 +776,7 @@ function init() {
     var v = this.value.trim(); Object.keys(state.merged).forEach(function (i) { state.merged[i] = v; }); if (state.book) draw();
   });
   $("save").onclick = savePNG;
+  $("fri6").onclick = function () { state.fri6 = !state.fri6; if (state.book) draw(); };
   // 메일 주소 복사(메일 앱 링크가 열리지 않는 환경도 있어서)
   $("copymail").onclick = function () {
     var btn = this, addr = $("mail").textContent, done = function (ok) { btn.textContent = ok ? "복사됨" : "주소를 길게 눌러 복사하세요"; setTimeout(function () { btn.textContent = "복사"; }, 2000); };
