@@ -775,16 +775,9 @@ function init() {
   });
   $("save").onclick = savePNG;
   $("fri6").onclick = function () { state.fri6 = !state.fri6; if (state.book) draw(); };
-  // 메일 주소 복사(메일 앱 링크가 열리지 않는 환경도 있어서)
-  $("copymail").onclick = function () {
-    var btn = this, addr = $("mail").textContent, done = function (ok) { btn.textContent = ok ? "복사됨" : "주소를 길게 눌러 복사하세요"; setTimeout(function () { btn.textContent = "복사"; }, 2000); };
-    try { navigator.clipboard.writeText(addr).then(function () { done(true); }, function () { selectMail(); done(false); }); }
-    catch (e) { selectMail(); done(false); }
-  };
   // 이름을 이미 기억하고 있으면 파일을 올린 뒤 바로 보여 준다
   window.addEventListener("beforeunload", function () {});
 }
-function selectMail() { try { var r = document.createRange(); r.selectNodeContents($("mail")); var sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); } catch (e) {} }
 async function savePNG() {
   var vm = currentVM(); if (!vm || vm.empty) return;
   var status = $("status"); status.textContent = "이미지를 만드는 중…"; $("save").disabled = true;
